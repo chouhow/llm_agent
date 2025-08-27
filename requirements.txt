@@ -1,2 +1,9 @@
 mysql-connector-python~=9.4.0
 openai
+python-dotenv
+fastmcp>=2.0.0
+langchain-mcp-adapters
+langgraph
+langchain-core
+langchain-openai
+streamlit
