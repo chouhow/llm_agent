@@ -80,3 +80,53 @@ def get_table_schema(table_name: str):
         if conn.is_connected():
             cursor.close()
             conn.close()
+
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_all_tables",
+            "description": "获取数据库中所有表的名称列表。不需要任何参数，直接返回所有表名。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_query_data",
+            "description": "执行SQL查询语句并返回结果。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "需要执行的SQL查询语句"
+                    }
+                },
+                "required": ["sql"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_table_schema",
+            "description": "获取指定表的创建结构信息（CREATE TABLE语句）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "需要获取结构的数据库表名称"
+                    }
+                },
+                "required": ["table_name"]
+            }
+        }
+    }
+]
