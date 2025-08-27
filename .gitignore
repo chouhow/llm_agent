@@ -71,6 +71,13 @@ Thumbs.db
 *.swo
 *~```
 
+# python-dotenv
+.env
+.env.local
+.env.*
+!.env.example
+
+
 ### 主要忽略项说明：
 - **Python相关**：字节码、虚拟环境、测试报告
 - **IDE文件**：PyCharm的.idea文件夹及相关文件
