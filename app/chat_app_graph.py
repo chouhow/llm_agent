@@ -1,15 +1,16 @@
 
 from pathlib import Path
+from time import sleep
 
 import streamlit as st
 
 import json
 import os
 
-from decimal import Decimal
-from datetime import date, datetime
+
 
 from dotenv import load_dotenv
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 
 from langchain_openai.chat_models import ChatOpenAI
@@ -21,7 +22,9 @@ from langchain_community.chat_models import ChatTongyi
 from langgraph.prebuilt import create_react_agent
 from mysql.connector import Error
 import mysql.connector
+from pymilvus import MilvusClient
 
+from rag.milvus_helper import search_questions
 from tools import print_langgraph_result
 
 
@@ -54,8 +57,8 @@ def get_all_tables():
 
     try:
         cursor = conn.cursor()
-        cursor.execute("SHOW TABLES")
-        tables = [table[0] for table in cursor.fetchall()]
+        cursor.execute("SHOW TABLE STATUS;")
+        tables = [{"Name":table[0],"Comment":table[-1]} for table in cursor.fetchall()]
         return {"tables": tables}
     except Error as e:
         return {"error": str(e)}
@@ -81,7 +84,7 @@ def get_query_data(sql: str):
         cursor.execute(sql)
         result = cursor.fetchall()
         query_data = {"data": result}
-        return json.dumps(query_data, cls=DBEncoder)
+        return query_data
     except Error as e:
         return {"error": str(e)}
     finally:
@@ -109,6 +112,7 @@ def get_table_schema(table_name: str):
             cursor.close()
             conn.close()
 
+tools=[get_table_schema,get_all_tables,get_query_data]
 
 load_dotenv()
 
@@ -123,16 +127,60 @@ config = {"configurable": {"thread_id": "1"}}
 
 checkpointer = InMemorySaver()
 
-agent = create_react_agent(model=llm,tools=[get_table_schema,get_all_tables,get_query_data],checkpointer=checkpointer)
+# agent = create_react_agent(model=llm,tools=tools,checkpointer=checkpointer)
+
+from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+    pre_call_tolls: list
+
+pre_call_tolls = [{"name":"get_all_tables","args":[]}]
+graph_builder = StateGraph(State)
+llm_with_tools = llm.bind_tools(tools)
+def llm_call(state: State):
+    print(state["messages"],flush=True)
+    return {"messages": [llm_with_tools.invoke(state["messages"])]}
 
 
-class DBEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, Decimal):
-            return str(obj)
-        if isinstance(obj, (date, datetime)):
-            return obj.isoformat()
-        return super(DBEncoder, self).default(obj)
+
+def route_tools(
+    state: State,
+):
+    """
+    Use in the conditional_edge to route to the ToolNode if the last message
+    has tool calls. Otherwise, route to the end.
+    """
+    if isinstance(state, list):
+        ai_message = state[-1]
+    elif messages := state.get("messages", []):
+        ai_message = messages[-1]
+    else:
+        raise ValueError(f"No messages found in input state to tool_edge: {state}")
+    if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
+        print("to tools")
+        return "tools"
+    print("to end")
+    return END
+
+from app_tool import BasicToolNode,ManualToolNode
+graph_builder.add_node("llm_call", llm_call)
+tool_node = BasicToolNode(tools=tools)
+graph_builder.add_node("tools", tool_node)
+pre_tools_node = ManualToolNode(tools=tools)
+graph_builder.add_node("pre_tools", pre_tools_node)
+
+# graph_builder.set_entry_point("pre_tools")
+graph_builder.set_entry_point("llm_call")
+# graph_builder.add_edge("pre_tools", "llm_call")
+graph_builder.add_conditional_edges("llm_call", route_tools,{"tools": "tools", END: END},)
+graph_builder.add_edge("tools", "llm_call")
+graph = graph_builder.compile()
+
+
 
 # 页面配置
 st.set_page_config(
@@ -141,21 +189,29 @@ st.set_page_config(
     layout="wide"
 )
 
-# 初始化会话状态
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "system",
-            "content": """你是一位数据库专家，擅长使用SQL语句进行数据库查询和操作。
-            根据用户的需求，生成并执行相应的SQL语句。
-            """
-        }
-    ]
+
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 
+def get_vector_store(URI ="http://192.168.100.27:19530"):
+    client = MilvusClient(uri=URI)
+    return client
+
+def build_prompt(question: str):
+    prompt = """你是公司内部的财务助手，角色是专业的财务人员，精通财务报表和发票税务知识，同时擅长使用SQL语句进行数据库查询。
+            根据用户的需求，生成并执行相应的mysql语句。    
+            注意选择合适的工具来完成任务。   
+            示例的sql仅供参考，除非确认示例问题和用户需求完全一致，否则不建议直接使用。  
+            """
+    # entities = search_questions(question)
+    # entity = entities[0]
+    # prompt += f"上下文：{entity['business_context']}\n"
+    # prompt += f"示例问题：{entity['question_text']}\n"
+    # prompt += f"对应SQL语句：{entity['example_sql']}\n\n"
+
+    return prompt
 
 # 清除对话函数
 def clear_chat():
@@ -199,14 +255,21 @@ for message in st.session_state.chat_history:
 
 
 # 处理用户输入
-if prompt := st.chat_input("请输入您的问题..."):
+if user_input := st.chat_input("请输入您的问题..."):
+
+    prompt = build_prompt(user_input)
+    system_prompt ={"role": "system","content": prompt }
+    if "messages" not in st.session_state:
+        st.session_state.messages = [system_prompt]
+
+
     # 将用户输入添加到消息列表
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.messages.append({"role": "user", "content": user_input})
 
     # 显示用户输入
     with st.chat_message("user"):
-        st.markdown(prompt)
-        st.session_state.chat_history.append({"role": "user", "components": [{"type": "text", "content": prompt}]})
+        st.markdown(user_input)
+        st.session_state.chat_history.append({"role": "user", "components": [{"type": "text", "content": user_input}]})
 
 
     with st.chat_message("assistant"):
@@ -214,7 +277,7 @@ if prompt := st.chat_input("请输入您的问题..."):
         full_response = ""
         history_components = []
         # 使用stream方法替代invoke，获取流式输出
-        for chunk in agent.stream({"messages": st.session_state.messages},config=config):
+        for chunk in graph.stream({"messages": st.session_state.messages,"pre_call_tolls":pre_call_tolls},config=config):
             # 每个chunk包含当前步骤的结果
             print("\n===== 中间结果 =====")
             for key, value in chunk.items():
@@ -232,8 +295,8 @@ if prompt := st.chat_input("请输入您的问题..."):
                             else:
                                 st.write("数据库表列表:")
                                 history_components.append({"type": "text", "content": "数据库表列表:"})
-                                st.code("\n".join(content["tables"]))
-                                history_components.append({"type": "code", "content": content['tables']})
+                                st.dataframe(content["tables"])
+                                history_components.append({"type": "dataframe", "content": content['tables']})
                         elif tool_name == "get_table_schema":
                             if "error" in content:
                                 st.error(f"获取结构错误: {content['error']}")
@@ -250,7 +313,7 @@ if prompt := st.chat_input("请输入您的问题..."):
                                 history_components.append({"type": "text", "content": "查询结果:"})
                                 st.dataframe(content["data"])
                                 history_components.append({"type": "dataframe", "content": content["data"]})
-                elif key == "agent":
+                elif key == "llm_call":
                     messages = value["messages"]
                     for message in messages:
                         tool_calls = message.additional_kwargs.get("tool_calls")
