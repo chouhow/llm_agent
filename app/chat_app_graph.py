@@ -212,15 +212,42 @@ def get_vector_store(URI ="http://192.168.100.27:19530"):
     client = MilvusClient(uri=URI)
     return client
 
+promptmanager = PromptManager("../background_prompts.md")
+
+
+
+
 def build_prompt(question: str):
     prompt = """你是公司内部的财务助手，角色是专业的财务人员，精通财务报表和发票税务知识，同时擅长使用SQL语句进行数据库查询。
-            根据用户的需求，生成并执行相应的mysql语句。    
-            注意选择合适的工具来完成任务。   
+            根据用户的需求，生成并执行相应的mysql语句。 生成sql语句后，需要调用工具执行sql语句。   
+            注意选择合适的工具来完成任务，包括执行sql查询，获取表结构等。   
+            输出给用户的回答，请遵循markdown语法。
+            根据用户的问题，简洁地回答问题，避免无关输出；如系统提示词中存在与用户问题无关的背景信息，也请忽略。
+            执行完sql语句后，不必再回复整个sql执行结果，简单总结即可。
             示例的sql仅供参考，除非确认示例问题和用户需求完全一致，否则不建议直接使用。  
             """
-    # entities = search_questions(question)
-    # entity = entities[0]
-    # prompt += f"上下文：{entity['business_context']}\n"
+
+    entities = search_questions(question)
+
+    hit_question = [entity['question_text'] for entity in entities]
+
+    print("hit_question:",hit_question)
+    entity = entities[0]
+    category = entity['category']
+    print("category:",category)
+    category_prompt = promptmanager.get_prompt(category)
+    prompt += "\n## 背景信息 可能和用户问题相关，也可能无关，请仔细甄别，避免无关输出。"
+    prompt += category_prompt
+    if category == "科目余额表":
+        tool_call = {
+            "name": "get_table_schema",
+            "args": {
+                "table_name": "jd_account_balance_table"
+            }
+        }
+        pre_call_tolls.append(tool_call)
+        print("pre_call_tolls",pre_call_tolls)
+
     # prompt += f"示例问题：{entity['question_text']}\n"
     # prompt += f"对应SQL语句：{entity['example_sql']}\n\n"
 
