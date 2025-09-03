@@ -1,4 +1,4 @@
-
+from datetime import datetime
 from pathlib import Path
 from time import sleep
 
@@ -24,6 +24,7 @@ from mysql.connector import Error
 import mysql.connector
 from pymilvus import MilvusClient
 
+from prompts.PromptManager import PromptManager
 from rag.milvus_helper import search_questions
 from tools import print_langgraph_result
 
@@ -36,10 +37,16 @@ from tools import print_langgraph_result
 def create_db_connection():
     """创建MySQL数据库连接"""
     try:
+        # conn = mysql.connector.connect(
+        #     host='192.168.100.27',
+        #     user='zmonv',  # 替换为你的数据库用户名
+        #     password='rpa@2025',  # 替换为你的数据库密码
+        #     database='zmonv_rpa'  # 替换为你的数据库名
+        # )
         conn = mysql.connector.connect(
-            host='192.168.100.27',
-            user='zmonv',  # 替换为你的数据库用户名
-            password='rpa@2025',  # 替换为你的数据库密码
+            host='127.0.0.1',
+            user='root',  # 替换为你的数据库用户名
+            password='123456',  # 替换为你的数据库密码
             database='zmonv_rpa'  # 替换为你的数据库名
         )
         return conn
@@ -112,7 +119,13 @@ def get_table_schema(table_name: str):
             cursor.close()
             conn.close()
 
-tools=[get_table_schema,get_all_tables,get_query_data]
+@tool()
+def get_current_time():
+    """获取当前时间，格式为YYYY年MM月DD日 HH时MM分SS秒"""
+    current_time = datetime.now()
+    return current_time.strftime("%Y年%m月%d日 %H时%M分%S秒")
+
+tools=[get_table_schema,get_all_tables,get_query_data,get_current_time]
 
 load_dotenv()
 
@@ -138,7 +151,7 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]
     pre_call_tolls: list
 
-pre_call_tolls = [{"name":"get_all_tables","args":[]}]
+pre_call_tolls = [{"name":"get_all_tables","args":[]},{"name":"get_current_time","args":[]}]
 graph_builder = StateGraph(State)
 llm_with_tools = llm.bind_tools(tools)
 def llm_call(state: State):
@@ -173,9 +186,9 @@ graph_builder.add_node("tools", tool_node)
 pre_tools_node = ManualToolNode(tools=tools)
 graph_builder.add_node("pre_tools", pre_tools_node)
 
-# graph_builder.set_entry_point("pre_tools")
-graph_builder.set_entry_point("llm_call")
-# graph_builder.add_edge("pre_tools", "llm_call")
+graph_builder.set_entry_point("pre_tools")
+# graph_builder.set_entry_point("llm_call")
+graph_builder.add_edge("pre_tools", "llm_call")
 graph_builder.add_conditional_edges("llm_call", route_tools,{"tools": "tools", END: END},)
 graph_builder.add_edge("tools", "llm_call")
 graph = graph_builder.compile()
