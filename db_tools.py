@@ -1,3 +1,5 @@
+import re
+
 import mysql.connector
 from mysql.connector import Error
 
@@ -27,8 +29,8 @@ def get_all_tables():
 
     try:
         cursor = conn.cursor()
-        cursor.execute("SHOW TABLES")
-        tables = [table[0] for table in cursor.fetchall()]
+        cursor.execute("SHOW TABLE STATUS;")
+        tables = [{"Name":table[0],"Comment":table[-1]} for table in cursor.fetchall()]
         return {"tables": tables}
     except Error as e:
         return {"error": str(e)}
@@ -46,14 +48,42 @@ def get_query_data(sql: str):
 
     try:
         cursor = conn.cursor(dictionary=True)
-        # 验证SQL语句类型，只允许查询或设置变量
-        sql_clean = sql.strip().lower()
-        allowed_prefixes = ['select', 'show', 'describe', 'explain', 'set']
-        if not any(sql_clean.startswith(prefix) for prefix in allowed_prefixes):
-            return {"error": "不允许执行该类型的SQL语句，仅支持查询或设置变量操作"}
-        cursor.execute(sql)
-        result = cursor.fetchall()
-        return {"data": result}
+        # 1. 去除注释行
+        # 移除单行注释 (-- 注释)
+        cleaned_sql = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
+        # 移除多行注释 (/* 注释 */)
+        cleaned_sql = re.sub(r'/\*.*?\*/', '', cleaned_sql, flags=re.DOTALL)
+        # 2. 按分号分割语句
+        statements = [stmt.strip() for stmt in cleaned_sql.split(';') if stmt.strip()]
+        # 3. 检查语句类型
+        allowed_keywords = {'select', 'show', 'describe', 'explain', 'set'}
+        for stmt in statements:
+            # 获取语句的第一个单词（转换为小写）
+            words = stmt.split()
+            if not words:
+                continue
+            first_word = words[0].lower()
+            # 检查是否在允许的关键词中
+            if first_word not in allowed_keywords:
+                return {"error": "不允许执行该类型的SQL语句，仅支持查询或设置变量操作"}
+        # 4. 执行语句，直到找到第一个有结果的查询
+
+        for stmt in statements:
+            cursor.execute(stmt)
+            # 如果有返回结果，立即返回
+            if cursor.description:
+                # 获取所有行
+                result = cursor.fetchall()
+                total_rows = len(result)
+                # 限制返回结果为最多10条
+                if total_rows > 10:
+                    result = result[:10]  # 只保留前10条
+                    return {"data": result, "rows": len(result), "total_rows": total_rows, "message": "结果超过10条，仅显示前10条"}
+                else:
+                    return {"data": result, "rows": total_rows}
+            else:
+                print(f"语句执行成功，但无返回结果: {stmt}")
+                continue
     except Error as e:
         return {"error": str(e)}
     finally:
@@ -99,7 +129,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_query_data",
-            "description": "执行SQL查询语句并返回结果。",
+            "description": "执行SQL查询语句,可以有多个语句,支持select,show,describe,explain,set。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -130,3 +160,16 @@ tools = [
         }
     }
 ]
+
+if __name__ == '__main__':
+   # print(get_all_tables())
+
+    sql = """
+    set @last_month=(SELECT file_date from jd_account_balance_table where subject_id = '1221' ORDER BY file_date desc LIMIT 1);
+    -- 根据科目代码和日期查出其他应收款明细
+    SELECT file_date as 日期,subject_name as 科目名称,functional_currency as 币别,initial_debit_balance as 期初借方余额,initial_credit_balance as 
+    期初贷方余额,current_debit_amount as 本期借方发生额,current_credit_amount as 本期贷方发生额,accumulated_debit_year as 本年借方累计,accumulated_credit_year as 
+    本年贷方累计,ending_debit_balances as 期末借方余额,ending_credit_balances as 期末贷方余额 from jd_account_balance_table where subject_id like '1221%' AND file_date=@last_month;
+    
+    """
+    print(get_query_data(sql))
