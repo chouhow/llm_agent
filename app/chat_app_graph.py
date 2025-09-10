@@ -43,16 +43,86 @@ def custom_append_only(left: List[Dict[str, Any]], right: List[Dict[str, Any]]) 
 class State(TypedDict):
     messages: Annotated[list, custom_append_only]
     pre_call_tolls: list
+    is_new_question: bool
 
 
 pre_call_tolls = []
 graph_builder = StateGraph(State)
-llm_with_tools = llm.bind_tools(tools)
 
 
-def llm_call(state: State):
-    print(state["messages"], flush=True)
-    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+# 添加新的判断节点函数
+def check_question_relevance(state: State):
+    # 获取历史消息和当前用户输入
+    messages = state["messages"]
+    if not messages:
+        return {"is_new_question": True}
+    print("1")
+
+    # 提取最近的用户消息
+    user_messages = [msg for msg in messages if msg.get("role") == "user"]
+    print(user_messages)
+    if not user_messages or len(user_messages) <= 1:
+        return {"is_new_question": True}
+
+    print("2")
+    current_question = user_messages[-1]["content"]
+    print("3")
+    # 构建用于判断相关性的提示
+    relevance_prompt = {
+        "role": "system",
+        "content": "你需要判断用户的当前问题是否与之前的对话相关。请输出'相关'或'不相关'，不要输出其他内容。"
+    }
+    # 准备发送给大模型的消息
+    history_messages = messages[:-1]  # 除了当前用户消息外的所有历史消息
+    check_relevant = {"role": "user", "content": f"历史对话: {history_messages}\n\n当前问题: {current_question}"}
+    chat_messages = [relevance_prompt,check_relevant]
+    for msg in chat_messages:
+        print(msg)
+    try:
+        client = OpenAI(
+            api_key=os.getenv("DASHSCOPE_API_KEY"),
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+
+        completion = client.chat.completions.create(
+            model="qwen3-235b-a22b",
+            messages=chat_messages,
+            max_tokens=10,
+            stream=True,
+        )
+
+        result = process_streaming_response(completion)
+        answer_content = result["answer_content"]
+        print(f"问题相关性判断结果: {answer_content}")
+        # 根据结果设置标识
+        if "不相关" in answer_content:
+            return {"is_new_question": True}
+        else:
+            return {"is_new_question": False}
+    except Exception as e:
+        print(f"判断问题相关性时出错: {e}")
+        # 出错时默认视为相关问题
+        return {"is_new_question": False}
+
+
+# 添加一个处理新问题的节点
+def handle_new_question(state: State):
+    user_message = [msg for msg in state["messages"] if msg.get("role") == "user"][-1]
+    # 清空消息
+    state["messages"] = []
+    question = user_message["content"]
+    system_prompt = build_prompt(question)
+    system_message = {"role": "system", "content": system_prompt}
+    # 重新构建messages，只包含系统提示和当前用户输入
+    new_messages = [system_message, user_message]
+    return {"messages": new_messages}
+
+
+def route_by_relevance(state: State):
+    if state["is_new_question"]:
+        return "handle_new_question"
+    else:
+        return "pre_tools"
 
 
 from openai import OpenAI
@@ -70,38 +140,20 @@ def get_message_role(msg_type: str) -> str:
         return msg_type
 
 
-def openai_llm_call(state: State):
-    client = OpenAI(
-        # 如果没有配置环境变量，请用阿里云百炼API Key替换：api_key="sk-xxx"
-        api_key=os.getenv("DASHSCOPE_API_KEY"),
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    )
-    # dict_messages = []
-    # for msg in state["messages"]:
-    #     role =get_message_role(msg.type)
-    #     content = msg.content
-    #     dict_msg={
-    #         "role":role,
-    #         "content":content
-    #     }
-    #     if hasattr(msg,"tool_call"):
-    #         dict_msg["tool_calls"] = msg.tool_call
-    #     dict_messages.append(dict_msg)
+def process_streaming_response(completion):
+    """
+    处理OpenAI API的流式输出响应
 
-    # dict_messages = [{"role": get_message_role(msg.type), "content": str(msg.content)} for msg in state["messages"] ]
-    # print(dict_messages)
-    dict_messages = state["messages"]
-    completion = client.chat.completions.create(
-        # model="qwen3-32b",
-        model="qwen3-235b-a22b",
-        messages=dict_messages,
-        parallel_tool_calls=True,
-        tools=db_tools.tools,
-        stream=True,
-    )
+    参数:
+        completion: OpenAI API返回的流式响应对象
+
+    返回:
+        dict: 包含answer_content, reasoning_content和tool_info的字典
+    """
     reasoning_content = ""  # 完整思考过程
     answer_content = ""  # 完整回复
     tool_info = []  # 存储工具调用信息
+
     for chunk in completion:
         if not chunk.choices:
             print("\nUsage:")
@@ -117,7 +169,7 @@ def openai_llm_call(state: State):
             print(delta.reasoning_content, end="", flush=True)
             reasoning_content += delta.reasoning_content
         # 处理工具调用信息（支持并行工具调用）
-        if delta.tool_calls is not None:
+        if  hasattr(delta,"tool_calls") and delta.tool_calls is not None:
             for tool_call in delta.tool_calls:
                 index = tool_call.index  # 工具调用索引，用于并行调用
 
@@ -140,13 +192,44 @@ def openai_llm_call(state: State):
                 if tool_call.function and tool_call.function.arguments:
                     tool_info[index]["function"]['arguments'] = tool_info[index]["function"].get('arguments',
                                                                                                  '') + tool_call.function.arguments
+
+    return {
+        "answer_content": answer_content,
+        "reasoning_content": reasoning_content,
+        "tool_info": tool_info
+    }
+
+
+def openai_llm_call(state: State):
+    client = OpenAI(
+        # 如果没有配置环境变量，请用阿里云百炼API Key替换：api_key="sk-xxx"
+        api_key=os.getenv("DASHSCOPE_API_KEY"),
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    dict_messages = state["messages"]
+    print("openai_llm_call",dict_messages)
+    completion = client.chat.completions.create(
+        # model="qwen3-32b",
+        model="qwen3-235b-a22b",
+        messages=dict_messages,
+        parallel_tool_calls=True,
+        tools=db_tools.tools,
+        stream=True,
+    )
+    result = process_streaming_response(completion)
+    answer_content = result["answer_content"]
+    tool_info = result["tool_info"]
     print(f"\n" + "=" * 19 + "工具调用信息" + "=" * 19)
     if not tool_info:
         print("没有工具调用")
     else:
         print(tool_info)
-
-    return {"messages": [{"role": "assistant", "content": answer_content, "tool_calls": tool_info}]}
+    # 如果tool_info为空就不要加上，否则报错：  Empty tool_calls is not supported in message
+    if tool_info:
+        return {"messages": [{"role": "assistant", "content": answer_content, "tool_calls": tool_info}]}
+    else:
+        return {"messages": [{"role": "assistant", "content": answer_content}]}
 
 
 def route_tools(
@@ -172,16 +255,24 @@ def route_tools(
 
 from app_tool import BasicToolNode, ManualToolNode
 
+tool_node = BasicToolNode()
+pre_tools_node = ManualToolNode()
+
+graph_builder.add_node("check_relevance", check_question_relevance)
+graph_builder.add_node("handle_new_question", handle_new_question)
 graph_builder.add_node("llm_call", openai_llm_call)
-tool_node = BasicToolNode(tools=tools)
 graph_builder.add_node("tools", tool_node)
-pre_tools_node = ManualToolNode(tools=tools)
 graph_builder.add_node("pre_tools", pre_tools_node)
 
-graph_builder.set_entry_point("pre_tools")
-# graph_builder.set_entry_point("llm_call")
+graph_builder.set_entry_point("check_relevance")  # 入口改为判断相关性
+graph_builder.add_conditional_edges(
+    "check_relevance",
+    route_by_relevance,
+    {"handle_new_question": "handle_new_question", "pre_tools": "pre_tools"}
+)
+graph_builder.add_edge("handle_new_question", "pre_tools")
 graph_builder.add_edge("pre_tools", "llm_call")
-graph_builder.add_conditional_edges("llm_call", route_tools, {"tools": "tools", END: END}, )
+graph_builder.add_conditional_edges("llm_call", route_tools, {"tools": "tools", END: END})
 graph_builder.add_edge("tools", "llm_call")
 graph = graph_builder.compile()
 
@@ -194,6 +285,9 @@ st.set_page_config(
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "messages" not in st.session_state:
+    print("init session_state messages")
+    st.session_state.messages = []
 
 
 def get_vector_store(URI="http://192.168.100.27:19530"):
@@ -213,9 +307,8 @@ def build_prompt(question: str):
 查询完sql后，使用一两行回复用户执行完成即可，不要在回复中列出详细记录。
 ## 注意事项
 注意选择合适的工具来完成任务，包括执行sql查询，获取表结构等。   
-根据用户的问题，简洁地回答问题，避免无关输出；
 ## 输出格式
-输出给用户的回答，请遵循markdown语法。 
+输出给用户的回答，请遵循markdown语法,简要总结即可，避免无关输出，不用输出详细的sql语句，也不用输出查询结果。 
 """
 
     entities = search_questions(question)
@@ -255,19 +348,6 @@ def build_prompt(question: str):
     )
 
     prompt += examples_prompt.format(input=question)
-
-    # if category == "科目余额表":
-    #     tool_call = {
-    #         "name": "get_table_schema",
-    #         "args": {
-    #             "table_name": "jd_account_balance_table"
-    #         }
-    #     }
-    #     pre_call_tolls.append(tool_call)
-    #     print("pre_call_tolls",pre_call_tolls)
-
-    # prompt += f"示例问题：{entity['question_text']}\n"
-    # prompt += f"对应SQL语句：{entity['example_sql']}\n\n"
     print("prompt:", prompt)
     return prompt
 
@@ -275,9 +355,10 @@ def build_prompt(question: str):
 # 清除对话函数
 def clear_chat():
     # 删除session_state中的messages
-    if "messages" in st.session_state:
-        del st.session_state.messages
+    # if "messages" in st.session_state:
+    #     del st.session_state.messages
     st.session_state.chat_history = []
+    st.session_state.messages = []
 
 
 # 页面标题和说明
@@ -314,11 +395,7 @@ for message in st.session_state.chat_history:
 # 处理用户输入
 if user_input := st.chat_input("请输入您的问题..."):
 
-    prompt = build_prompt(user_input)
-    system_prompt = {"role": "system", "content": prompt}
-    if "messages" not in st.session_state:
-        st.session_state.messages = [system_prompt]
-
+    print("handle input messages ", [msg.get("role") for msg in st.session_state.messages])
     # 将用户输入添加到消息列表
     st.session_state.messages.append({"role": "user", "content": user_input})
 
@@ -334,10 +411,18 @@ if user_input := st.chat_input("请输入您的问题..."):
         # 使用stream方法替代invoke，获取流式输出
         for chunk in graph.stream({"messages": st.session_state.messages, "pre_call_tolls": pre_call_tolls},
                                   config=config):
+            # 检查是否是新问题，如果是则清除聊天历史
+            if "check_relevance" in chunk and chunk["check_relevance"].get("is_new_question"):
+                print("clear chat ")
+                clear_chat()
+
             # 每个chunk包含当前步骤的结果
             print("\n===== 中间结果 =====")
             for key, value in chunk.items():
                 print(f"{key}: {value}")
+                if "messages" in value:
+                    print(f"add {key} messages:")
+                    st.session_state.messages.extend(value["messages"])
                 if key == "tools":
                     messages = value["messages"]
                     for message in messages:

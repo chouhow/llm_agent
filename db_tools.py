@@ -8,10 +8,16 @@ from mysql.connector import Error
 def create_db_connection():
     """创建MySQL数据库连接"""
     try:
+        # conn = mysql.connector.connect(
+        #     host='192.168.100.27',
+        #     user='zmonv',  # 替换为你的数据库用户名
+        #     password='rpa@2025',  # 替换为你的数据库密码
+        #     database='zmonv_rpa'  # 替换为你的数据库名
+        # )
         conn = mysql.connector.connect(
-            host='192.168.100.27',
-            user='zmonv',  # 替换为你的数据库用户名
-            password='rpa@2025',  # 替换为你的数据库密码
+            host='127.0.0.1',
+            user='root',  # 替换为你的数据库用户名
+            password='123456',  # 替换为你的数据库密码
             database='zmonv_rpa'  # 替换为你的数据库名
         )
         return conn
