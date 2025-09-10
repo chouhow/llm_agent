@@ -1,6 +1,4 @@
 import unittest
-import mysql.connector
-from mysql.connector import Error
 from db_tools import create_db_connection, get_all_tables, get_query_data, get_table_schema
 
 class TestDBTools(unittest.TestCase):
@@ -12,8 +10,6 @@ class TestDBTools(unittest.TestCase):
         'database': 'zmonv_rpa'  # 建议使用测试专用数据库
     }
     TEST_TABLE = 'corp_info'
-
-
 
     def test_create_db_connection(self):
         conn = create_db_connection()

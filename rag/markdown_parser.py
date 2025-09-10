@@ -47,7 +47,7 @@ class SQLKnowledgeParser:
         )
         # 匹配业务背景部分
         background_pattern = re.compile(
-            r'^###\s+业务背景\s*(.*?)(?=^#{1,2}\s+|$)',
+            r'^###\s+问题分析\s*(.*?)(?=^#{1,2}\s+|$)',
             re.DOTALL | re.MULTILINE
         )
 
@@ -111,7 +111,7 @@ if __name__ == "__main__":
             print(f"类别: {item['category']}")
             print(f"问题: {item['question']}")
             print(f"SQL示例:\n{item['sql']}\n")
-            print(f"业务背景:\n{item['background']}\n")
+            print(f"问题背景:\n{item['background']}\n")
             print("-" * 80)
     except Exception as e:
         print(f"发生错误: {str(e)}")

@@ -7,3 +7,12 @@ langgraph
 langchain-core
 langchain-openai
 streamlit
+
+langchain_community
+pydantic
+dashscope
+langchain-mcp-adapters
+pymilvus
+langchain_milvus
+
+flask

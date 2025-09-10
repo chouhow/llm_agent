@@ -19,7 +19,7 @@ def create_milvus_collection_question_sql():
     schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True, auto_id=True)
     schema.add_field(field_name="question_vector", datatype=DataType.FLOAT_VECTOR, dim=1024)
     schema.add_field(field_name="question_text", datatype=DataType.VARCHAR, max_length=1024)
-    schema.add_field(field_name="business_context", datatype=DataType.VARCHAR, max_length=1024)
+    schema.add_field(field_name="question_context", datatype=DataType.VARCHAR, max_length=1024)
     schema.add_field(field_name="example_sql", datatype=DataType.VARCHAR, max_length=1024)
     schema.add_field(field_name="category", datatype=DataType.VARCHAR, max_length=32)
 
@@ -44,7 +44,7 @@ def insert_question_to_milvus():
             obj= {
                 "question_vector": question_vector,
                 "question_text": question,
-                "business_context": business_context,
+                "question_context": business_context,
                 "example_sql": example_sql,
                 "category": category
             }
@@ -68,7 +68,7 @@ def search_questions(question: str):
         collection_name=Questions_Collection,
         data=[query_vector],
         limit=3,
-        output_fields=["question_text", "business_context", "example_sql"],
+        output_fields=["question_text", "question_context", "example_sql", "category"],
         search_params={"metric_type": "L2"}
     )
     entities = [ r["entity"] for r in res[0]]
@@ -76,6 +76,6 @@ def search_questions(question: str):
 
 if __name__ == '__main__':
     # create_milvus_collection_question_sql()
-    # insert_question_to_milvus()
-    res = search_questions("广告")
-    print(res)
+    insert_question_to_milvus()
+    # res = search_questions("广告")
+    # print(res)
