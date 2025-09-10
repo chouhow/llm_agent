@@ -1,181 +1,29 @@
-import re
-from datetime import datetime
-from pathlib import Path
-from time import sleep
-
-import streamlit as st
-
 import json
 import os
 
+import streamlit as st
 from dotenv import load_dotenv
-from langchain_core.messages import ToolMessage, AIMessage
-from langchain_core.tools import tool
-
 from langchain_openai.chat_models import ChatOpenAI
-
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.config import get_store
 from pydantic import SecretStr
-from langchain_community.chat_models import ChatTongyi
-from langgraph.prebuilt import create_react_agent
-from mysql.connector import Error
-import mysql.connector
 from pymilvus import MilvusClient
 
 import db_tools
 from prompts.PromptManager import PromptManager
 from rag.milvus_helper import search_questions
-from tools import print_langgraph_result
-
-
-# project_root = Path(__file__).resolve().parent.parent
-# env_file_path = project_root / '.env.27'
-# print(env_file_path)
-# load_dotenv(dotenv_path=env_file_path)
-
-def create_db_connection():
-    """创建MySQL数据库连接"""
-    try:
-        # conn = mysql.connector.connect(
-        #     host='192.168.100.27',
-        #     user='zmonv',  # 替换为你的数据库用户名
-        #     password='rpa@2025',  # 替换为你的数据库密码
-        #     database='zmonv_rpa'  # 替换为你的数据库名
-        # )
-        conn = mysql.connector.connect(
-            host='127.0.0.1',
-            user='root',  # 替换为你的数据库用户名
-            password='123456',  # 替换为你的数据库密码
-            database='zmonv_rpa'  # 替换为你的数据库名
-        )
-        return conn
-    except Error as e:
-        print(f"数据库连接错误: {e}")
-        return None
-
-
-@tool()
-def get_all_tables():
-    """获取数据库中所有表的名称"""
-    conn = create_db_connection()
-    if not conn:
-        return {"error": "无法连接数据库"}
-
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SHOW TABLE STATUS;")
-        tables = [{"Name": table[0], "Comment": table[-1]} for table in cursor.fetchall()]
-        return {"tables": tables}
-    except Error as e:
-        return {"error": str(e)}
-    finally:
-        if conn.is_connected():
-            cursor.close()
-            conn.close()
-
-
-@tool()
-def get_query_data(sql: str):
-    """执行sql查询语句"""
-    conn = create_db_connection()
-    if not conn:
-        return {"error": "无法连接数据库"}
-
-    try:
-        cursor = conn.cursor(dictionary=True)
-        # 1. 去除注释行
-        # 移除单行注释 (-- 注释)
-        cleaned_sql = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
-        # 移除多行注释 (/* 注释 */)
-        cleaned_sql = re.sub(r'/\*.*?\*/', '', cleaned_sql, flags=re.DOTALL)
-        # 2. 按分号分割语句
-        statements = [stmt.strip() for stmt in cleaned_sql.split(';') if stmt.strip()]
-        # 3. 检查语句类型
-        allowed_keywords = {'select', 'show', 'describe', 'explain', 'set'}
-        for stmt in statements:
-            # 获取语句的第一个单词（转换为小写）
-            words = stmt.split()
-            if not words:
-                continue
-            first_word = words[0].lower()
-            # 检查是否在允许的关键词中
-            if first_word not in allowed_keywords:
-                return {"error": "不允许执行该类型的SQL语句，仅支持查询或设置变量操作"}
-        # 4. 执行语句，直到找到第一个有结果的查询
-
-        for stmt in statements:
-            cursor.execute(stmt)
-            # 如果有返回结果，立即返回
-            if cursor.description:
-                # 获取所有行
-                result = cursor.fetchall()
-                return {"data": result}
-            else:
-                print(f"语句执行成功，但无返回结果: {stmt}")
-                continue
-    except Error as e:
-        return {"error": str(e)}
-    finally:
-        if conn.is_connected():
-            cursor.close()
-            conn.close()
-
-
-@tool()
-def get_table_schema(table_name: str):
-    """获取表的创建信息"""
-    conn = create_db_connection()
-    if not conn:
-        return {"error": "无法连接数据库"}
-
-    try:
-        cursor = conn.cursor()
-        cursor.execute(f"SHOW CREATE TABLE {table_name}")
-        result = cursor.fetchone()
-        return {"schema": result[1]}  # 返回CREATE TABLE语句
-    except Error as e:
-        return {"error": str(e)}
-    finally:
-        if conn.is_connected():
-            cursor.close()
-            conn.close()
-
-
-@tool()
-def get_current_time():
-    """获取当前时间，格式为YYYY年MM月DD日 HH时MM分SS秒"""
-    current_time = datetime.now()
-    return current_time.strftime("%Y年%m月%d日 %H时%M分%S秒")
-
-
-tools = [get_table_schema, get_all_tables, get_query_data, get_current_time]
 
 load_dotenv()
 
 if not os.environ.get("OPENAI_API_KEY") or not os.environ.get("OPENAI_API_BASE"):
     raise ValueError("OPENAI_API_KEY and OPENAI_API_BASE must be set")
 
-print(f"模型Base URL: {os.getenv("OPENAI_API_BASE")}")
-CHAT_MODEL = os.getenv("CHAT_MODEL")
-# 阿里百炼
-llm = ChatOpenAI(model="qwen3-32b", api_key=SecretStr(os.getenv("DASHSCOPE_API_KEY")),
-                 base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
-# 27服务器
-# llm = ChatOpenAI(model=os.getenv("SERVER27_CHAT_MODEL"), api_key=SecretStr("no_need"),base_url=os.getenv("SERVER27_API_BASE"))
-# 硅基流动
-# llm = ChatOpenAI(model=os.getenv("SILICONFLOW_CHAT_MODEL"), api_key=SecretStr(os.getenv("SILICONFLOW_API_KEY")),base_url=os.getenv("SILICONFLOW_API_BASE"))
-
 config = {"configurable": {"thread_id": "1"}}
 
 checkpointer = InMemorySaver()
 
-# agent = create_react_agent(model=llm,tools=tools,checkpointer=checkpointer)
-
 from typing import Annotated
 from typing_extensions import TypedDict
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
+from langgraph.graph import StateGraph, END
 
 from typing import List, Dict, Any
 
@@ -189,7 +37,6 @@ def custom_append_only(left: List[Dict[str, Any]], right: List[Dict[str, Any]]) 
     # 如果 right 是单个字典，则转换为列表
     if not isinstance(right, list):
         right = [right]
-
     return left + right
 
 
