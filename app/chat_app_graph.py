@@ -3,9 +3,7 @@ import os
 
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_openai.chat_models import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
-from pydantic import SecretStr
 from pymilvus import MilvusClient
 
 import db_tools
@@ -56,17 +54,12 @@ def check_question_relevance(state: State):
     messages = state["messages"]
     if not messages:
         return {"is_new_question": True}
-    print("1")
-
     # 提取最近的用户消息
     user_messages = [msg for msg in messages if msg.get("role") == "user"]
     print(user_messages)
     if not user_messages or len(user_messages) <= 1:
         return {"is_new_question": True}
-
-    print("2")
     current_question = user_messages[-1]["content"]
-    print("3")
     # 构建用于判断相关性的提示
     relevance_prompt = {
         "role": "system",
@@ -75,7 +68,7 @@ def check_question_relevance(state: State):
     # 准备发送给大模型的消息
     history_messages = messages[:-1]  # 除了当前用户消息外的所有历史消息
     check_relevant = {"role": "user", "content": f"历史对话: {history_messages}\n\n当前问题: {current_question}"}
-    chat_messages = [relevance_prompt,check_relevant]
+    chat_messages = [relevance_prompt, check_relevant]
     for msg in chat_messages:
         print(msg)
     try:
@@ -153,13 +146,11 @@ def process_streaming_response(completion):
     reasoning_content = ""  # 完整思考过程
     answer_content = ""  # 完整回复
     tool_info = []  # 存储工具调用信息
-
     for chunk in completion:
         if not chunk.choices:
             print("\nUsage:")
             print(chunk.usage)
             continue
-
         delta = chunk.choices[0].delta
         if hasattr(delta, "content") and delta.content:
             print(delta.content, end="", flush=True)
@@ -169,30 +160,25 @@ def process_streaming_response(completion):
             print(delta.reasoning_content, end="", flush=True)
             reasoning_content += delta.reasoning_content
         # 处理工具调用信息（支持并行工具调用）
-        if  hasattr(delta,"tool_calls") and delta.tool_calls is not None:
+        if hasattr(delta, "tool_calls") and delta.tool_calls is not None:
             for tool_call in delta.tool_calls:
                 index = tool_call.index  # 工具调用索引，用于并行调用
-
                 # 动态扩展工具信息存储列表
                 while len(tool_info) <= index:
                     tool_info.append({})
-
                 # 收集工具调用ID（用于后续函数调用）
                 if tool_call.id:
                     tool_info[index]['id'] = tool_info[index].get('id', '') + tool_call.id
-
                 if tool_call.function and tool_info[index].get("function") is None:
                     tool_info[index]["function"] = {}
                 # 收集函数名称（用于后续路由到具体函数）
                 if tool_call.function and tool_call.function.name:
                     tool_info[index]["function"]['name'] = tool_info[index]["function"].get('name',
                                                                                             '') + tool_call.function.name
-
                 # 收集函数参数（JSON字符串格式，需要后续解析）
                 if tool_call.function and tool_call.function.arguments:
                     tool_info[index]["function"]['arguments'] = tool_info[index]["function"].get('arguments',
                                                                                                  '') + tool_call.function.arguments
-
     return {
         "answer_content": answer_content,
         "reasoning_content": reasoning_content,
@@ -208,7 +194,7 @@ def openai_llm_call(state: State):
     )
 
     dict_messages = state["messages"]
-    print("openai_llm_call",dict_messages)
+    print("openai_llm_call", dict_messages)
     completion = client.chat.completions.create(
         # model="qwen3-32b",
         model="qwen3-235b-a22b",
@@ -308,7 +294,9 @@ def build_prompt(question: str):
 ## 注意事项
 注意选择合适的工具来完成任务，包括执行sql查询，获取表结构等。   
 ## 输出格式
-输出给用户的回答，请遵循markdown语法,简要总结即可，避免无关输出，不用输出详细的sql语句，也不用输出查询结果。 
+输出给用户的回答，请遵循markdown语法。
+最终输出简要总结即可，控制在一行内，不用输出详细的sql语句和人名，公司名。 
+如果查询的记录仅显示部分，需要提醒用户查到多少条，显示了多少条。
 """
 
     entities = search_questions(question)
@@ -370,6 +358,7 @@ st.sidebar.button("清除对话历史", on_click=clear_chat, type="primary")
 # 显示对话历史
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
+        print(f"#############渲染：   {message["role"]}")
         for component in message["components"]:
             if component["type"] == "code":
                 st.code(component["content"])
@@ -414,7 +403,10 @@ if user_input := st.chat_input("请输入您的问题..."):
             # 检查是否是新问题，如果是则清除聊天历史
             if "check_relevance" in chunk and chunk["check_relevance"].get("is_new_question"):
                 print("clear chat ")
-                clear_chat()
+                st.session_state.chat_history = []
+                st.session_state.messages = []
+                st.session_state.chat_history.append(
+                    {"role": "user", "components": [{"type": "text", "content": user_input}]})
 
             # 每个chunk包含当前步骤的结果
             print("\n===== 中间结果 =====")
@@ -460,6 +452,7 @@ if user_input := st.chat_input("请输入您的问题..."):
                         tool_calls = message.get("tool_calls")
                         if tool_calls is None or len(tool_calls) == 0:
                             st.markdown(message.get("content"))
+                            history_components.append({"type": "text", "content": message.get("content")})
                         else:
                             for tool_call in tool_calls:
                                 func = tool_call["function"]
@@ -467,9 +460,12 @@ if user_input := st.chat_input("请输入您的问题..."):
                                 arguments = json.loads(func["arguments"])
                                 if name == "get_query_data":
                                     st.write("执行SQL:")
+                                    history_components.append({"type": "text", "content": "执行SQL:"})
                                     st.code(arguments["sql"])
+                                    history_components.append({"type": "code", "content": arguments["sql"]})
                                 elif name == "get_table_schema":
                                     st.write(arguments["table_name"])
+                                    history_components.append({"type": "text", "content": arguments["table_name"]})
                 else:
                     print(f"其他键: {key}")
 
